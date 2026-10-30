@@ -13,6 +13,9 @@ pip install -e '.[dev]'
 pytest          # run tests
 ruff check .    # lint
 mypy            # type-check
+
+python -m consensus.demo           # narrated run: election, crash, re-election, recovery
+python -m consensus.demo --step    # one tick at a time, with every node's state
 ```
 
 ## Design

@@ -49,18 +49,42 @@ class Cluster:
             for node_id in ids
         }
         self.network = Network(random.Random(rng.getrandbits(64)))
+        self.crashed: set[NodeId] = set()
         self.now = 0
+        # Called after every step; the demo uses this to narrate a run.
+        self.observers: list[Callable[[], None]] = []
+
+    def live_nodes(self) -> list[RaftNode]:
+        return [node for node_id, node in self.nodes.items() if node_id not in self.crashed]
 
     def step(self) -> None:
-        """Advance time by one tick: tick every node, then deliver due messages."""
+        """Advance time by one tick: tick every live node, then deliver due messages.
+
+        Messages addressed to a crashed node are lost. Messages it sent before
+        crashing are still in flight and may yet arrive.
+        """
         self.now += 1
-        for node in self.nodes.values():
+        for node in self.live_nodes():
             node.tick()
         for envelope in self.network.due(self.now):
-            self.nodes[envelope.dst].receive(envelope.src, envelope.message)
-        for node in self.nodes.values():
+            if envelope.dst not in self.crashed:
+                self.nodes[envelope.dst].receive(envelope.src, envelope.message)
+        for node in self.live_nodes():
             for envelope in node.take_outbox():
                 self.network.send(self.now, envelope)
+        for observer in self.observers:
+            observer()
+
+    def crash(self, node_id: NodeId) -> None:
+        self.crashed.add(node_id)
+
+    def restart(self, node_id: NodeId) -> None:
+        """Bring a node back with only what it had on disk: term, vote and log."""
+        old = self.nodes[node_id]
+        self.nodes[node_id] = RaftNode(
+            node_id, (node_id, *old.peers), state=old.state, rng=old.rng, config=old.config
+        )
+        self.crashed.discard(node_id)
 
     def run(self, ticks: int) -> None:
         for _ in range(ticks):
@@ -75,9 +99,9 @@ class Cluster:
             raise TimeoutError(f"condition not met within {max_ticks} ticks (seed={self.seed})")
 
     def leader(self) -> RaftNode | None:
-        """The leader of the highest term, if any. A deposed leader from an
+        """The live leader of the highest term, if any. A deposed leader from an
         older term may still believe it leads; it is not the cluster's leader."""
-        leaders = [node for node in self.nodes.values() if node.role is Role.LEADER]
+        leaders = [node for node in self.live_nodes() if node.role is Role.LEADER]
         return max(leaders, key=lambda node: node.term, default=None)
 
     def wait_for_leader(self) -> RaftNode:
@@ -93,4 +117,4 @@ class Cluster:
         return index
 
     def wait_for_applied(self, index: int) -> None:
-        self.run_until(lambda: all(n.last_applied >= index for n in self.nodes.values()))
+        self.run_until(lambda: all(n.last_applied >= index for n in self.live_nodes()))
