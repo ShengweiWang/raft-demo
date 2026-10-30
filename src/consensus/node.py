@@ -154,8 +154,11 @@ class RaftNode:
         self._count_vote(self.id)
 
     def _on_request_vote(self, src: NodeId, m: RequestVote) -> None:
-        # Only vote for a candidate whose log is at least as up to date as ours
-        # (§5.4.1): compare last term first, then length. Tuples compare that way.
+        # Only vote for a candidate whose log is at least as up to date as ours:
+        # a newer last term wins, and for equal terms the longer log wins (tuples
+        # compare exactly that way). A committed entry is on a majority and a
+        # winner needs a majority of votes, so some voter holds the entry and
+        # refuses any candidate without it. A leader never lacks a committed entry.
         log_ok = (m.last_log_term, m.last_log_index) >= (self.log.last_term, self.log.last_index)
         not_voted_for_other = self.state.voted_for in (None, m.candidate_id)
         grant = m.term == self.term and not_voted_for_other and log_ok
@@ -178,8 +181,9 @@ class RaftNode:
         self.leader_id = self.id
         self.next_index = {peer: self.log.last_index + 1 for peer in self.peers}
         self.match_index = {peer: 0 for peer in self.peers}
-        # A leader can only commit entries from its own term (§5.4.2). Appending a
-        # no-op lets it commit any leftovers from earlier terms straight away.
+        # A leader only commits entries from its own term (see
+        # _advance_commit_index), so append a no-op now: once it reaches a
+        # majority, any leftover entries from earlier terms commit with it.
         self.propose(Noop())
 
     def _become_follower(self, term: int) -> None:
@@ -250,8 +254,12 @@ class RaftNode:
         # is our whole log) and take the quorum-th largest.
         matched = sorted([self.log.last_index, *self.match_index.values()], reverse=True)
         majority_index = matched[self.quorum - 1]
-        # Count replicas only for entries from our own term (§5.4.2). Older
-        # entries are committed along with them, since they come first in the log.
+        # Only an entry from our own term is safe to commit by counting. An older
+        # entry can sit on a majority and still be overwritten: a candidate whose
+        # last entry has a newer term than the holders' wins their votes and then
+        # replaces it. Our term is the newest in the cluster, so once a majority
+        # holds one of our entries, no node lacking it can collect a majority of
+        # votes. Older entries commit along with it, since they come earlier.
         if majority_index > self.commit_index and self.log.term_at(majority_index) == self.term:
             self.commit_index = majority_index
             self._apply_committed()

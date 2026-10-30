@@ -1,7 +1,8 @@
 """Raft RPCs, modelled as one-way messages.
 
-The paper describes request/response RPCs. Here each request and each reply is
-an independent message, so the network can drop, delay or reorder either half.
+Raft is usually described as request/response calls. Here each request and each
+reply is an independent message, so the network can drop, delay or reorder either
+half.
 """
 
 from __future__ import annotations

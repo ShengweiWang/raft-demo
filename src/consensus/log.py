@@ -15,7 +15,7 @@ class LogEntry:
 
 
 class RaftLog:
-    """A 1-indexed log, as in the paper.
+    """A 1-indexed log.
 
     Index 0 is a virtual sentinel with term 0, so the consistency check for the
     very first entry (prev_log_index=0, prev_log_term=0) needs no special case.
