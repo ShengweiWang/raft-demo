@@ -221,8 +221,103 @@ them, so a log cut below its commit index went unnoticed. It now checks that.
 
 ## Trade-offs and limitations
 
-<!-- What was deliberately left out, and what would change for a real system. -->
+### Persistence is simulated in memory, not written to disk
+
+The key simplification. Raft requires each node's term, vote and log to
+survive a crash. Here they live in a `PersistentState` object held in memory,
+and a "crash" means the simulator throws away the node and builds a new one
+from that same object; everything else (role, commit index, state machine) is
+lost, as it would be in a real crash.
+
+- **What this tests:** the protocol's use of persistence: what must be kept,
+  what may be lost, and how a restarted node recovers (e.g. it can't vote twice
+  in a term; it rebuilds its state by replaying the log).
+- **What it doesn't test:** the disk itself. Every change counts as durable the
+  instant it happens, as if each write were synced before any message is sent.
+  A real implementation must sync before replying, and must cope with torn or
+  partial writes and corrupted files, none of which is modelled here.
+
+Writing to disk would add file formats and slow tests without exercising any
+more of the consensus logic, so it was left out deliberately.
+
+### Other simplifications
+
+- **Simulated network, not sockets.** One thread, a virtual clock and a seeded
+  random generator, so every run, including a failing one, replays exactly.
+  The cost: no real concurrency, timing or I/O errors.
+- **The leader always sends its whole unconfirmed log.** No batch size limit
+  and no pipelining, so unconfirmed entries are resent on every heartbeat.
+  Simple, and lost messages need no extra retry logic, but wasteful at scale.
+- **The leader steps back one entry per round trip** to find where a
+  follower's log diverges. Slow for long divergences; skipping a whole
+  conflicting term at once is a standard speed-up.
+- **No pre-vote.** A node that rejoins after a long isolation forces an
+  unnecessary election (failure mode 11).
+- **No snapshots or log compaction.** The log grows forever, and a restarted
+  node replays all of it.
+- **No membership changes.** The cluster's members are fixed at start.
+- **No client request ids.** A client that retries may apply a command twice,
+  so the tests use commands that are safe to repeat (`Put`).
+- **Reads aren't guaranteed fresh.** Nothing stops a deposed leader that
+  hasn't noticed yet from serving old values.
 
 ## Working with AI
 
-<!-- What was delegated, how it was verified, and where the tools got it wrong. -->
+I built this with an AI coding agent (Claude Code). The agent wrote most of
+the code; my role was to choose the approach, understand and challenge every
+part, and decide what to keep.
+
+**How I used it**
+
+1. **Choosing the algorithm.** I asked for an opinion on Raft versus Paxos.
+   The reasoning (single-decree Paxos is simpler but agrees on only one value;
+   replicating a log needs leader election and log repair, which Raft
+   specifies and Multi-Paxos leaves open) matched my own, so I chose Raft.
+2. **Writing the core, then simplifying it.** The agent wrote the node, log
+   and simulator with happy-path tests. I found the first version harder to
+   read than necessary and asked for it to be simplified, without changing
+   behaviour.
+3. **Having it explain the algorithm to me, piece by piece.** I went through
+   `RaftNode` section by section, with a "check yourself" question after each,
+   answering in my own words and having my answers corrected. I asked for
+   explanations from first principles rather than references to the paper,
+   and for the code comments to be rewritten the same way, so I can defend
+   each rule without outside reading.
+4. **Asking it to write more tests around the algorithm.** First a list of
+   failure modes with what each means and what should happen (the section
+   above), then a test for each, a per-tick invariant checker, and a
+   randomized fault test.
+5. **A visual demo** (`python -m consensus.demo --step`) to watch elections,
+   crashes and log repair one tick at a time.
+
+**How I verified it**
+
+- Reviewed each commit before it went in.
+- Questioned the explanations until they held together on concrete
+  scenarios, e.g. tracing who can win an election after a leader crashes.
+- Deliberately inserted known bugs into the code and checked that the tests
+  fail (see "Do the tests catch bugs?").
+- Ran the suite repeatedly to catch flaky tests.
+
+**Where it got things wrong, and how that was caught**
+
+- **An unstated assumption in an explanation.** Walking through an election
+  scenario, it assumed every surviving node had already reached the leader's
+  term. I asked how it knew; it didn't. The precise answer (at least a
+  majority must have, because terms spread through the votes) became a
+  better explanation.
+- **An overstated claim.** It said a new leader's first AppendEntries
+  "usually fails" against a stale follower. When I asked why, it worked
+  through examples and corrected itself: with one leader change the first
+  attempt often succeeds.
+- **Bugs in its own tests.** Several new tests failed at first because of
+  mistakes in the tests (reading a value after it had changed, waiting for
+  the wrong condition), not in Raft. One earlier test was flaky because of an
+  unseeded random timeout.
+- **A false claim in this README**: that a failing random seed could be
+  replayed in the demo. The demo can't do that; the claim was removed.
+- **Tests weaker than they looked.** The randomized test passed every seed
+  but barely exercised log repair, and on its own catches only 2 of 7
+  inserted bugs. Measuring this led to sending writes to stale leaders as
+  well, and to stating the limit openly. The same exercise found a gap in the
+  invariant checker, now fixed.
