@@ -1,6 +1,6 @@
 """A deterministic, single-threaded simulation of a Raft cluster.
 
-All randomness (election timeouts, message delays) comes from one seeded RNG,
+All randomness (election timeouts, message delays, faults) comes from one seeded RNG,
 so any run, including a failing one, can be replayed exactly from its seed.
 """
 
@@ -8,34 +8,67 @@ from __future__ import annotations
 
 import heapq
 import random
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 
+from consensus.invariants import InvariantChecker
 from consensus.messages import Envelope, NodeId
 from consensus.node import Config, RaftNode, Role
 from consensus.state_machine import Command
 
 
 class Network:
-    """Delivers each message after a random delay, so messages can be reordered."""
+    """Delivers each message after a random delay, so messages can be reordered.
+
+    It can also drop or duplicate messages at random, and be split into
+    partitions whose members cannot reach each other.
+    """
 
     def __init__(self, rng: random.Random, min_delay: int = 1, max_delay: int = 3) -> None:
         self._rng = rng
         self.min_delay = min_delay
         self.max_delay = max_delay
+        self.drop_rate = 0.0
+        self.duplicate_rate = 0.0
+        # Which side of a partition each node is on; empty means fully connected.
+        self._side: dict[NodeId, int] = {}
         # (deliver_at, sequence number, envelope); the sequence number breaks
         # ties deterministically and keeps envelopes from being compared.
         self._in_flight: list[tuple[int, int, Envelope]] = []
         self._sequence = 0
 
+    def partition(self, *groups: Iterable[NodeId]) -> None:
+        """Only nodes in the same group can reach each other. A node left out of
+        every group is cut off from everyone."""
+        self._side = {node_id: side for side, group in enumerate(groups) for node_id in group}
+
+    def heal(self) -> None:
+        self._side = {}
+
+    def can_reach(self, src: NodeId, dst: NodeId) -> bool:
+        if not self._side:
+            return True
+        side = self._side.get(src)
+        return side is not None and side == self._side.get(dst)
+
     def send(self, now: int, envelope: Envelope) -> None:
-        deliver_at = now + self._rng.randint(self.min_delay, self.max_delay)
-        heapq.heappush(self._in_flight, (deliver_at, self._sequence, envelope))
-        self._sequence += 1
+        # Only draw from the RNG for faults that are switched on, so turning
+        # faults off leaves every other random choice, and so each seed, unchanged.
+        if self.drop_rate and self._rng.random() < self.drop_rate:
+            return
+        copies = 2 if self.duplicate_rate and self._rng.random() < self.duplicate_rate else 1
+        for _ in range(copies):
+            deliver_at = now + self._rng.randint(self.min_delay, self.max_delay)
+            heapq.heappush(self._in_flight, (deliver_at, self._sequence, envelope))
+            self._sequence += 1
 
     def due(self, now: int) -> list[Envelope]:
+        # Reachability is checked on delivery, not on send, so a partition also
+        # cuts off messages that were already on their way.
         envelopes = []
         while self._in_flight and self._in_flight[0][0] <= now:
-            envelopes.append(heapq.heappop(self._in_flight)[2])
+            envelope = heapq.heappop(self._in_flight)[2]
+            if self.can_reach(envelope.src, envelope.dst):
+                envelopes.append(envelope)
         return envelopes
 
 
@@ -51,6 +84,8 @@ class Cluster:
         self.network = Network(random.Random(rng.getrandbits(64)))
         self.crashed: set[NodeId] = set()
         self.now = 0
+        # Raises SafetyViolation the moment any safety property breaks.
+        self.checker = InvariantChecker(self)
         # Called after every step; the demo uses this to narrate a run.
         self.observers: list[Callable[[], None]] = []
 
@@ -72,6 +107,7 @@ class Cluster:
         for node in self.live_nodes():
             for envelope in node.take_outbox():
                 self.network.send(self.now, envelope)
+        self.checker.check()
         for observer in self.observers:
             observer()
 

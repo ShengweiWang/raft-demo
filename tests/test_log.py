@@ -39,3 +39,9 @@ def test_merge_of_entries_already_held_is_a_no_op() -> None:
     log = RaftLog([entry(1, "a"), entry(1, "b"), entry(1, "c")])
     log.merge(0, [entry(1, "a")])
     assert log.last_index == 3
+
+
+def test_merge_truncates_from_the_first_conflict() -> None:
+    log = RaftLog([entry(1, "a"), entry(2, "stale"), entry(2, "stale too")])
+    log.merge(1, [entry(3, "b")])
+    assert log.entries_from(1) == (entry(1, "a"), entry(3, "b"))
