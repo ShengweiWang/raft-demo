@@ -11,6 +11,7 @@ import random
 from collections.abc import Callable, Iterable
 
 from consensus.invariants import InvariantChecker
+from consensus.log import LogEntry
 from consensus.messages import Envelope, NodeId
 from consensus.node import Config, RaftNode, Role
 from consensus.state_machine import Command
@@ -154,3 +155,48 @@ class Cluster:
 
     def wait_for_applied(self, index: int) -> None:
         self.run_until(lambda: all(n.last_applied >= index for n in self.live_nodes()))
+
+    def write(self, command: Command, *, patience: int = 100, max_ticks: int = 3000) -> int:
+        """Act like a client: send the command to the leader and retry until it commits.
+
+        A proposal can be lost if its leader is deposed, or never commit if the
+        leader can't reach a majority, so after `patience` ticks without a commit
+        the client tries again, possibly through another leader. As with a real
+        client that has no request ids, a retry can apply a command twice, so
+        callers should use commands that are safe to repeat, like Put.
+        Returns the index the command committed at.
+        """
+        deadline = self.now + max_ticks
+        while self.now < deadline:
+            leader = self.wait_for_leader()
+            index = leader.propose(command)
+            assert index is not None
+            entry = LogEntry(leader.term, command)
+            for _ in range(patience):
+                if leader.commit_index >= index or leader.role is not Role.LEADER:
+                    break
+                if leader.id in self.crashed:
+                    break
+                self.step()
+            if leader.commit_index >= index and leader.log[index] == entry:
+                return index
+        raise TimeoutError(f"{command} not committed within {max_ticks} ticks (seed={self.seed})")
+
+    def wait_for_convergence(self, max_ticks: int = 3000) -> RaftNode:
+        """Run until one leader has committed its whole log, and every live node
+        holds exactly that log and has applied all of it. Returns the leader."""
+
+        def converged() -> bool:
+            leader = self.leader()
+            if leader is None or leader.commit_index != leader.log.last_index:
+                return False
+            log = leader.log.entries_from(1)
+            return all(
+                n.log.entries_from(1) == log and n.last_applied == len(log)
+                for n in self.live_nodes()
+            )
+
+        self.run_until(converged, max_ticks)
+        leader = self.leader()
+        assert leader is not None
+        return leader

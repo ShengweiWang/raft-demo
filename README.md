@@ -57,9 +57,10 @@ it is not covered yet.
 - **Expect:** logs still converge. A late message never removes entries a newer
   one added (the follower only truncates at a real conflict), and a late reply
   never moves the leader's view of a follower backwards.
-- **Status:** Tested implicitly. Every cluster test runs with random delays, and
-  `test_log.py` checks that re-sending entries a follower already holds is a no-op.
-  Planned: an explicit test.
+- **Status:** Tested. `test_late_append_entries_does_not_undo_a_newer_one`,
+  `test_late_reply_does_not_move_the_leader_backwards`, and
+  `test_long_delays_still_converge` (delays up to 8 ticks, close to the
+  election timeout). Every other cluster test also runs with random delays.
 
 #### 2. Lost messages
 - **Meaning:** any message, request or reply, can vanish.
@@ -67,15 +68,17 @@ it is not covered yet.
   reply is resent on the next heartbeat, because the leader keeps sending
   everything a follower hasn't confirmed. A lost vote may stall an election; the
   candidate times out and retries in a higher term.
-- **Status:** Planned.
+- **Status:** Tested. `test_lost_messages_slow_progress_but_never_break_it`
+  (30% of messages dropped).
 
 #### 3. Duplicated messages
 - **Meaning:** the same message is delivered twice.
 - **Expect:** no effect. Votes are counted as a set of voters, a node re-grants
   its vote to the same candidate in the same term, re-sent log entries are
   recognised as already present, and confirmations only ever move forward.
-- **Status:** Partly tested (a repeated vote request, in `test_node.py`).
-  Planned: duplication across a whole cluster.
+- **Status:** Tested. `test_duplicate_vote_is_counted_once`,
+  `test_repeated_request_from_same_candidate_is_granted_again`, and
+  `test_duplicated_messages_change_nothing` (half of all messages delivered twice).
 
 #### 4. Competing candidates (split vote)
 - **Meaning:** two or more nodes time out together and split the votes, so no
@@ -83,8 +86,10 @@ it is not covered yet.
 - **Expect:** no leader for that term. Each candidate's own timer fires again at
   a random time, so one usually gets ahead and wins a later term. Never two
   leaders in one term.
-- **Status:** Tested. `test_node.py` checks one vote per term, and
-  `test_election.py` runs 20 seeds per cluster size, some of which split votes.
+- **Status:** Tested. `test_split_vote_elects_no_one_and_retries_in_higher_terms`
+  forces a 2–2 split in a four-node cluster with a partition, so the split is
+  certain rather than lucky. `test_grants_one_vote_per_term` covers the vote
+  itself.
 
 #### 5. Leader crash
 - **Meaning:** the leader stops; its messages stop.
@@ -93,7 +98,8 @@ it is not covered yet.
   holding all committed entries can collect a majority of votes. Writes the old
   leader accepted but had not committed may be lost; their clients were never
   told they succeeded.
-- **Status:** Planned (the demo shows it, but only a smoke test runs it).
+- **Status:** Tested. `test_leader_crash_elects_a_new_leader_and_keeps_committed_writes`
+  and `test_write_the_crashed_leader_never_sent_is_lost`.
 
 #### 6. Follower crash and restart
 - **Meaning:** a node stops and later comes back with only what was on disk:
@@ -101,7 +107,8 @@ it is not covered yet.
 - **Expect:** it rejoins as a follower, learns the commit index from the
   leader's next message, and rebuilds its state by replaying the log. Because
   its vote survived, it cannot vote for a second candidate in the same term.
-- **Status:** Planned.
+- **Status:** Tested. `test_restarted_follower_catches_up_by_replaying_the_log`
+  and `test_restart_does_not_allow_a_second_vote_in_the_same_term`.
 
 #### 7. Stale leader cut off in a minority
 - **Meaning:** a partition leaves the leader with fewer than half the nodes.
@@ -110,14 +117,16 @@ it is not covered yet.
   keeps committing. When the partition heals, the old leader sees the higher
   term and steps down, and its uncommitted entries are replaced by the new
   leader's. Its clients never see those writes applied.
-- **Status:** Planned.
+- **Status:** Tested. `test_stale_leader_cannot_commit_and_steps_down_when_healed`.
 
 #### 8. Majority lost
 - **Meaning:** a partition or crashes leave no side with a majority.
 - **Expect:** no leader can be elected and nothing commits. This is the
   deliberate choice: stop rather than risk disagreement. Once a majority can
   talk again, it elects a leader and continues with no committed entry lost.
-- **Status:** Planned.
+  A write that was accepted but not committed may or may not survive: if a node
+  holding it wins the next election, it commits along with that leader's no-op.
+- **Status:** Tested. `test_without_a_majority_nothing_commits_until_healed`.
 
 #### 9. A follower's log diverged over several terms
 - **Meaning:** a follower holds entries, from leaders that later lost power, at
@@ -125,9 +134,11 @@ it is not covered yet.
 - **Expect:** the leader's consistency check fails, and it steps back one entry
   per round trip until the logs agree. The follower then drops its conflicting
   entries and takes the leader's. Only uncommitted entries can conflict, so
-  nothing committed is ever removed.
-- **Status:** Tested at the log level (`test_merge_truncates_from_the_first_conflict`).
-  Planned: a cluster-level test.
+  nothing committed is ever removed. A follower also never commits past what
+  the leader's message proved it shares: entries beyond that point may be stale.
+- **Status:** Tested. `test_diverged_follower_log_is_repaired` (a follower three
+  entries off, across terms 2 and 3), `test_follower_commits_only_what_the_message_proved`,
+  and `test_merge_truncates_from_the_first_conflict`.
 
 #### 10. An older-term entry reaches a majority but isn't safe yet
 - **Meaning:** a leader finishes copying an entry left over from an earlier
@@ -143,8 +154,9 @@ it is not covered yet.
   from its own term. Older entries commit together with a newer one built on
   top of them. That's why a new leader immediately appends a no-op: once the
   no-op is on a majority, S2 and S3 end in term 4 and refuse S5's vote request.
-- **Status:** Planned (`test_leader_does_not_commit_old_term_entry_by_counting`).
-  Today no test fails if this rule is removed.
+- **Status:** Tested. `test_leader_does_not_commit_old_term_entry_by_counting`
+  replays step 3 on S1, and `test_voters_refuse_the_older_log_once_the_no_op_reaches_them`
+  replays step 4 on S2, with and without the no-op.
 
 #### 11. A node rejoins after a long isolation
 - **Meaning:** a cut-off node keeps timing out, raising its term each time
@@ -155,7 +167,9 @@ it is not covered yet.
   availability briefly suffers. This is a known limitation: the usual fix is a
   "pre-vote" round in which a node asks whether it *would* win before raising
   its term.
-- **Status:** Planned (to document the behaviour, not to fix it).
+- **Status:** Tested, to document the behaviour rather than fix it.
+  `test_rejoining_node_forces_an_election`, with and without writes while the
+  node was away.
 
 #### 12. All of the above at random
 - **Meaning:** random crashes, restarts, partitions, losses and duplicates while
@@ -163,7 +177,7 @@ it is not covered yet.
 - **Expect:** the invariant checker never fires. After all faults are healed,
   the cluster elects one leader and every node ends with the same log and the
   same state within a bounded number of ticks. A failing seed can be replayed
-  exactly, and stepped through with `python -m consensus.demo --step`.
+  exactly by re-running the test for that seed.
 - **Status:** Planned.
 
 ### Not modelled

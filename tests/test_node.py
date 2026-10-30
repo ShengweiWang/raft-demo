@@ -1,11 +1,13 @@
 """Unit tests that drive a single node directly, without the simulator."""
 
+import random
+
 from consensus.messages import AppendEntries, RequestVote, RequestVoteReply
 from consensus.node import RaftNode, Role
 
 
 def make_node() -> RaftNode:
-    return RaftNode("n0", ["n0", "n1", "n2"])
+    return RaftNode("n0", ["n0", "n1", "n2"], rng=random.Random(0))
 
 
 def replies(node: RaftNode) -> list[object]:
@@ -27,10 +29,13 @@ def test_repeated_request_from_same_candidate_is_granted_again() -> None:
     assert replies(node) == [RequestVoteReply(1, True), RequestVoteReply(1, True)]
 
 
-def test_becomes_candidate_after_election_timeout() -> None:
+def test_becomes_candidate_exactly_at_election_timeout() -> None:
     node = make_node()
-    for _ in range(node.config.election_timeout_max):
+    for _ in range(node.election_timeout - 1):
         node.tick()
+    role_before = node.role
+    node.tick()
+    assert role_before is Role.FOLLOWER
     assert node.role is Role.CANDIDATE
     assert node.term == 1
     assert {envelope.dst for envelope in node.take_outbox()} == {"n1", "n2"}
