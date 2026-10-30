@@ -178,7 +178,37 @@ it is not covered yet.
   the cluster elects one leader and every node ends with the same log and the
   same state within a bounded number of ticks. A failing seed can be replayed
   exactly by re-running the test for that seed.
-- **Status:** Planned.
+- **Status:** Tested. `test_random_faults_never_break_safety_and_the_cluster_recovers`,
+  100 seeds of 40 rounds each. Clients write to every node that believes it
+  leads, including stale ones, so conflicting entries really get overwritten.
+  In a typical seed the cluster goes through about 27 terms, commits about 24
+  entries, and spends about 90 ticks with no majority available.
+
+### Do the tests catch bugs?
+
+To check, each of these bugs was put into the code one at a time and the suite
+was run:
+
+| Bug | Caught by the whole suite | Caught by the random test alone |
+|---|---|---|
+| Commit without a majority | yes (many tests) | yes |
+| Vote without checking how up to date the candidate's log is | yes (many tests) | yes |
+| Commit an older-term entry by counting copies | yes (`test_leader_does_not_commit_old_term_entry_by_counting`) | no |
+| Forget the vote on restart | yes (`test_restart_does_not_allow_a_second_vote_in_the_same_term`) | no |
+| Truncate the log without a real conflict | yes (`test_late_append_entries_does_not_undo_a_newer_one`) | no |
+| Follower commits past what the message proved | yes (`test_follower_commits_only_what_the_message_proved`) | no |
+| Late reply moves the leader's view backwards | yes (`test_late_reply_does_not_move_the_leader_backwards`) | no |
+
+Random faults reliably find blunt bugs but rarely produce the exact schedule a
+subtle one needs, which is why each subtle rule also has a targeted test. Two
+notes: this leader always sends its whole log, so the "commits past what the
+message proved" case can only be built by hand (it arises with batched sends).
+And moving the leader's view backwards turns out not to break safety here,
+since the commit index can't go back; it only causes extra resends.
+
+This exercise also found a gap in the invariant checker itself: it compared
+each node's committed entries but not that the log still *contained* all of
+them, so a log cut below its commit index went unnoticed. It now checks that.
 
 ### Not modelled
 

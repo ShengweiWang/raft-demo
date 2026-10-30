@@ -74,6 +74,11 @@ class InvariantChecker:
         # and "a committed entry is never removed": every node's committed prefix
         # must agree with everything ever committed anywhere. Since nodes apply
         # exactly their committed prefix in order, their state machines agree too.
+        if node.log.last_index < node.commit_index:
+            self._fail(
+                f"{node.id} has committed through index {node.commit_index} "
+                f"but its log now ends at {node.log.last_index}"
+            )
         prefix = node.log.entries_from(1)[: node.commit_index]
         known = min(len(prefix), len(self.committed))
         if prefix[:known] != tuple(self.committed[:known]):

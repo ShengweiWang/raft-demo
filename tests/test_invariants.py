@@ -134,3 +134,12 @@ def test_restart_may_reset_commit_index(cluster: Cluster) -> None:
     cluster.restart("n0")
     assert cluster.nodes["n0"].commit_index == 0
     cluster.checker.check()
+
+
+def test_log_cut_below_the_commit_index(cluster: Cluster) -> None:
+    n0 = cluster.nodes["n0"]
+    set_state(n0, term=1, log=[entry(1, "a"), entry(1, "b")], commit=2)
+    cluster.checker.check()
+    n0.state.log = RaftLog([entry(1, "a")])
+    with pytest.raises(SafetyViolation, match="but its log now ends at 1"):
+        cluster.checker.check()
